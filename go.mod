@@ -1,4 +1,4 @@
-module github.com/nkonev/watermill-opentelemetry
+module github.com/Gungniir/watermill-opentelemetry
 
 go 1.22
 
