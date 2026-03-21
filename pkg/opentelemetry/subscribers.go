@@ -1,6 +1,8 @@
 package opentelemetry
 
 import (
+	"fmt"
+
 	"github.com/ThreeDotsLabs/watermill/message"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -20,25 +22,23 @@ func Trace(options ...Option) message.HandlerMiddleware {
 
 // TraceHandler decorates a watermill HandlerFunc to add tracing when a message is received.
 func TraceHandler(h message.HandlerFunc, options ...Option) message.HandlerFunc {
-	config := &config{}
+	config := &config{
+		tracer: otel.Tracer(subscriberTracerName),
+		spanNameFunc: func(handler, topic string) string {
+			return fmt.Sprintf("%s: %s", handler, topic)
+		},
+	}
 
 	for _, opt := range options {
 		opt(config)
 	}
 
-	var tracer trace.Tracer
-	if config.tracer != nil {
-		tracer = config.tracer
-	} else {
-		tracer = otel.Tracer(subscriberTracerName)
-	}
-
 	return func(msg *message.Message) ([]*message.Message, error) {
 		msgctx := msg.Context()
-		spanName := message.HandlerNameFromCtx(msgctx)
+		spanName := config.spanNameFunc(message.HandlerNameFromCtx(msgctx), message.SubscribeTopicFromCtx(msgctx))
 		ctxWithParentSpan := getPropagator(config).Extract(msgctx, metadataWrapper{msg.Metadata})
 
-		ctx, span := tracer.Start(ctxWithParentSpan, spanName,
+		ctx, span := config.tracer.Start(ctxWithParentSpan, spanName,
 			trace.WithSpanKind(trace.SpanKindConsumer),
 			trace.WithAttributes(config.spanAttributes...),
 

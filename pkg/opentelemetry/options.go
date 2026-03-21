@@ -12,6 +12,7 @@ type config struct {
 	spanAttributes    []attribute.KeyValue
 	textMapPropagator propagation.TextMapPropagator
 	tracer            trace.Tracer
+	spanNameFunc      func(subscriberOrPublisherName, topic string) string
 }
 
 // Option provides a convenience wrapper for simple options that can be
@@ -36,5 +37,12 @@ func WithTextMapPropagator(p propagation.TextMapPropagator) Option {
 func WithTracer(t trace.Tracer) Option {
 	return func(c *config) {
 		c.tracer = t
+	}
+}
+
+// WithSpanNameFunc sets SpanNameFunc.
+func WithSpanNameFunc(spanNameFunc func(subscriberOrPublisherName, topic string) string) Option {
+	return func(c *config) {
+		c.spanNameFunc = spanNameFunc
 	}
 }

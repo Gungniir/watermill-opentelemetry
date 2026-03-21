@@ -2,8 +2,9 @@ package opentelemetry
 
 import (
 	"fmt"
-	"go.opentelemetry.io/otel/propagation"
 	"strings"
+
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/ThreeDotsLabs/watermill/message"
 	"go.opentelemetry.io/otel"
@@ -19,7 +20,6 @@ type PublisherDecorator struct {
 	pub           message.Publisher
 	publisherName string
 	config        config
-	tracer        trace.Tracer
 }
 
 // NewPublisherDecorator instantiates a PublisherDecorator with a default name.
@@ -29,24 +29,21 @@ func NewPublisherDecorator(pub message.Publisher, options ...Option) message.Pub
 
 // NewNamedPublisherDecorator instantiates a PublisherDecorator with a provided name.
 func NewNamedPublisherDecorator(name string, pub message.Publisher, options ...Option) message.Publisher {
-	config := config{}
+	config := config{
+		tracer: otel.Tracer(publisherTracerName),
+		spanNameFunc: func(publisher, topic string) string {
+			return fmt.Sprintf("%s: %s", publisher, topic)
+		},
+	}
 
 	for _, opt := range options {
 		opt(&config)
-	}
-
-	var tracer trace.Tracer
-	if config.tracer != nil {
-		tracer = config.tracer
-	} else {
-		tracer = otel.Tracer(publisherTracerName)
 	}
 
 	return &PublisherDecorator{
 		pub:           pub,
 		publisherName: name,
 		config:        config,
-		tracer:        tracer,
 	}
 }
 
@@ -74,12 +71,15 @@ func (p *PublisherDecorator) Publish(topic string, messages ...*message.Message)
 
 func (p *PublisherDecorator) startSpan(topic string, msg *message.Message) trace.Span {
 	msgctx := msg.Context()
-	spanName := message.PublisherNameFromCtx(msgctx)
-	if spanName == "" {
-		spanName = p.publisherName
+
+	publisherName := message.PublisherNameFromCtx(msgctx)
+	if publisherName == "" {
+		publisherName = p.publisherName
 	}
 
-	ctx, span := p.tracer.Start(msgctx, spanName, trace.WithSpanKind(trace.SpanKindProducer))
+	spanName := p.config.spanNameFunc(publisherName, topic)
+
+	ctx, span := p.config.tracer.Start(msgctx, spanName, trace.WithSpanKind(trace.SpanKindProducer))
 	msg.SetContext(ctx)
 
 	p.getPropagator().Inject(ctx, metadataWrapper{msg.Metadata})
