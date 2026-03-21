@@ -33,16 +33,20 @@ func TraceHandler(h message.HandlerFunc, options ...Option) message.HandlerFunc 
 		tracer = otel.Tracer(subscriberTracerName)
 	}
 
-	spanOptions := []trace.SpanStartOption{
-		trace.WithSpanKind(trace.SpanKindConsumer),
-		trace.WithAttributes(config.spanAttributes...),
-	}
-
 	return func(msg *message.Message) ([]*message.Message, error) {
 		msgctx := msg.Context()
 		spanName := message.HandlerNameFromCtx(msgctx)
-		ctxWithSpan := getPropagator(config).Extract(msgctx, metadataWrapper{msg.Metadata})
-		ctx, span := tracer.Start(ctxWithSpan, spanName, spanOptions...)
+		ctxWithParentSpan := getPropagator(config).Extract(msgctx, metadataWrapper{msg.Metadata})
+
+		ctx, span := tracer.Start(ctxWithParentSpan, spanName,
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(config.spanAttributes...),
+
+			// According to the specification, we should start a new root span
+			// and link it to the parent span.
+			trace.WithNewRoot(),
+			trace.WithLinks(trace.LinkFromContext(ctxWithParentSpan)),
+		)
 
 		spanAttributes := []attribute.KeyValue{
 			semconv.MessagingDestinationKindTopic,
