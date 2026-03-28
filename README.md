@@ -2,16 +2,16 @@
 
 Repository-local Watermill tracing helpers built on OpenTelemetry.
 
-This package keeps standard Watermill transport tracing and adds a repository convention for business tracing over messaging.
+This package keeps standard Watermill transport tracing and adds a repository convention for handler process tracing over messaging.
 
 ## Concepts
 
 The package distinguishes two tracing layers:
 
 - transport spans: publisher and consumer spans created around broker interaction
-- business spans: handler spans created for application work
+- process spans: handler spans created for application work
 
-Transport spans describe message movement. Business spans describe workflow causality.
+Transport spans describe message movement. Process spans describe local handler execution and workflow continuation.
 
 ## Message kinds
 
@@ -31,28 +31,29 @@ Typical import alias:
 import wotelmeta "github.com/Gungniir/watermill-opentelemetry/pkg/opentelemetry/metadata"
 ```
 
-## Business tracing convention
+## Process tracing convention
 
 ### `event`
 
 - consumer transport span remains a transport span
-- handler business span starts as a new root span
-- business span links to upstream propagated context when present
-- business span links to local transport span when present
+- consumer transport span starts as a new root span and links to upstream propagated context when present
+- handler process span is created from the local consumer span
+- handler process span links to the local transport span
 
 ### `command`
 
 - consumer transport span remains a transport span
-- handler business span continues the propagated workflow context
-- business span is not a child of the local transport span
-- business span links to the local transport span
+- first handler process span is created from the local consumer span
+- when propagated upstream workflow context is present, a second handler process span is created in that workflow
+- workflow-linked process span links to the local process span
 
 ### `command_response`
 
 - reply metadata may carry callee trace context
-- caller business work must resume the original workflow context saved when the command was sent
-- business span links to callee reply context
-- business span links to local transport span
+- consumer transport span links to the propagated callee reply context
+- first handler process span is created from the local consumer span
+- caller workflow resumes from the registry entry saved when the command was published
+- resumed workflow process span links to the local process span
 
 ## Registry
 
@@ -76,7 +77,7 @@ wotel.WithCommandResponseRegistry(registry)
 Additional behavior:
 
 - `WithDefaultMessageKind(kind)` sets `message_kind` when the message does not already declare one
-- `command` messages register the current workflow `SpanContext` in the configured command-response registry by `correlation_id`
+- `command` messages register the current message context `SpanContext` in the configured command-response registry by `correlation_id` before the producer span is started
 
 Example:
 
@@ -91,20 +92,19 @@ publisher = wotel.NewPublisherDecorator(
 
 `TraceHandler(...)` still creates the Watermill consumer transport span.
 
-It now also creates a business span for handler execution according to `message_kind`:
+It now also creates process spans for handler execution according to `message_kind`:
 
-- `event`: new root + links
-- `command`: continue workflow context + link transport
-- `command_response`: resume original workflow context from registry + links
+- `event`: consumer root span linked to upstream + one process child span linked to transport
+- `command`: consumer root span + one local process child span, optionally plus a workflow-linked process span
+- `command_response`: consumer root span linked to callee + one local process child span + one resumed workflow process span
 
-The handler receives the business-shaped context through `msg.Context()`.
+The handler receives the final process context through `msg.Context()`.
 
 ## Options
 
 - `WithTracer(...)`: transport tracer
 - `WithSpanNameFunc(...)`: transport span naming
-- `WithBusinessTracer(...)`: business tracer
-- `WithBusinessSpanNameFunc(...)`: business span naming
+- `WithBusinessSpanNameFunc(...)`: process span naming
 - `WithTextMapPropagator(...)`: custom propagator
 - `WithSpanAttributes(...)`: extra transport span attributes
 - `WithCommandResponseRegistry(...)`: custom reply registry
@@ -112,12 +112,6 @@ The handler receives the business-shaped context through `msg.Context()`.
 
 ## Custom attributes
 
-This package uses a repository-specific attribute for business intent:
+This package uses a repository-specific attribute for process intent:
 
 - `messaging.message.kind`
-
-Related diagnostic attributes:
-
-- `messaging.message.context_missing`
-- `messaging.message.command_response_registry_miss`
-- `messaging.message.invalid_kind`

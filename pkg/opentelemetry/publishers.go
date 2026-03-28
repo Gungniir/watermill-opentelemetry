@@ -22,7 +22,7 @@ const publisherTracerName = "watermill/publisher"
 type PublisherDecorator struct {
 	pub           message.Publisher
 	publisherName string
-	config        config
+	config        *config
 }
 
 // NewPublisherDecorator instantiates a PublisherDecorator with a default name.
@@ -32,16 +32,16 @@ func NewPublisherDecorator(pub message.Publisher, options ...Option) message.Pub
 
 // NewNamedPublisherDecorator instantiates a PublisherDecorator with a provided name.
 func NewNamedPublisherDecorator(name string, pub message.Publisher, options ...Option) message.Publisher {
-	config := config{
+	config := &config{
 		tracer: otel.Tracer(publisherTracerName),
-		spanNameFunc: func(publisher, topic string) string {
+		consumeSpanNameFunc: func(publisher, topic string) string {
 			return fmt.Sprintf("%s: %s", publisher, topic)
 		},
 		commandResponseRegistry: defaultCommandResponseRegistry,
 	}
 
 	for _, opt := range options {
-		opt(&config)
+		opt(config)
 	}
 
 	return &PublisherDecorator{
@@ -84,13 +84,16 @@ func (p *PublisherDecorator) startSpan(topic string, msg *message.Message) trace
 		publisherName = p.publisherName
 	}
 
-	spanName := p.config.spanNameFunc(publisherName, topic)
+	if messageKind(msg, p.config) == MessageKindCommand {
+		p.registerCommandWorkflow(msgctx, msg)
+	}
+
+	spanName := p.config.consumeSpanNameFunc(publisherName, topic)
 
 	ctx, span := p.config.tracer.Start(msgctx, spanName, trace.WithSpanKind(trace.SpanKindProducer))
 	msg.SetContext(ctx)
 
 	p.getPropagator().Inject(ctx, metadataWrapper{msg.Metadata})
-	p.registerCommandWorkflow(ctx, msg)
 
 	spanAttributes := []attribute.KeyValue{
 		semconv.MessagingDestinationKindTopic,
@@ -108,13 +111,6 @@ func (p *PublisherDecorator) startSpan(topic string, msg *message.Message) trace
 }
 
 func (p *PublisherDecorator) registerCommandWorkflow(ctx context.Context, msg *message.Message) {
-	if p.config.commandResponseRegistry == nil {
-		return
-	}
-	if messageKind(msg, &p.config) != MessageKindCommand {
-		return
-	}
-
 	correlationID := msg.Metadata.Get(wotelmeta.CorrelationID)
 	spanContext := trace.SpanContextFromContext(ctx)
 	if !spanContext.IsValid() {
@@ -139,9 +135,9 @@ func (p *PublisherDecorator) Close() error {
 func (p *PublisherDecorator) getPropagator() propagation.TextMapPropagator {
 	if p.config.textMapPropagator != nil {
 		return p.config.textMapPropagator
-	} else {
-		return otel.GetTextMapPropagator()
 	}
+
+	return otel.GetTextMapPropagator()
 }
 
 func structName(v interface{}) string {

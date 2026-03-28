@@ -26,11 +26,12 @@ func Trace(options ...Option) message.HandlerMiddleware {
 func TraceHandler(h message.HandlerFunc, options ...Option) message.HandlerFunc {
 	config := &config{
 		tracer: otel.Tracer(subscriberTracerName),
-		spanNameFunc: func(handler, topic string) string {
+		consumeSpanNameFunc: func(handler, topic string) string {
 			return fmt.Sprintf("%s: %s", handler, topic)
 		},
-		businessTracer:          otel.Tracer(businessTracerName),
-		businessSpanNameFunc:    defaultBusinessSpanName,
+		processSpanNameFunc: func(handler, topic, kind string) string {
+			return fmt.Sprintf("%s: %s [%s]", handler, topic, kind)
+		},
 		commandResponseRegistry: defaultCommandResponseRegistry,
 	}
 
@@ -40,10 +41,12 @@ func TraceHandler(h message.HandlerFunc, options ...Option) message.HandlerFunc 
 
 	return func(msg *message.Message) ([]*message.Message, error) {
 		msgctx := msg.Context()
-		spanName := config.spanNameFunc(message.HandlerNameFromCtx(msgctx), message.SubscribeTopicFromCtx(msgctx))
 		ctxWithParentSpan := getPropagator(config).Extract(msgctx, metadataWrapper{msg.Metadata})
 
-		ctx, span := config.tracer.Start(ctxWithParentSpan, spanName,
+		handlerName := message.HandlerNameFromCtx(ctxWithParentSpan)
+		topicName := message.SubscribeTopicFromCtx(msgctx)
+
+		consumeSpanCtx, consumeSpan := config.tracer.Start(ctxWithParentSpan, config.consumeSpanNameFunc(handlerName, topicName),
 			trace.WithSpanKind(trace.SpanKindConsumer),
 			trace.WithAttributes(config.spanAttributes...),
 
@@ -55,42 +58,40 @@ func TraceHandler(h message.HandlerFunc, options ...Option) message.HandlerFunc 
 
 		spanAttributes := []attribute.KeyValue{
 			semconv.MessagingDestinationKindTopic,
-			semconv.MessagingDestinationKey.String(message.SubscribeTopicFromCtx(ctx)),
+			semconv.MessagingDestinationKey.String(message.SubscribeTopicFromCtx(consumeSpanCtx)),
 			semconv.MessagingOperationReceive,
 		}
 		msgName := msg.Metadata.Get("name")
 		if len(msgName) > 0 {
 			spanAttributes = append(spanAttributes, semconv.MessageTypeKey.String(msgName))
 		}
-		span.SetAttributes(spanAttributes...)
-		msg.SetContext(ctx)
+		consumeSpan.SetAttributes(spanAttributes...)
 
-		businessCtx, businessSpan := startBusinessSpan(config, msg, ctx, ctxWithParentSpan)
-		msg.SetContext(businessCtx)
+		ctx, processSpan, linkedProcessSpan := startProcessSpan(config, msg, consumeSpanCtx, ctxWithParentSpan)
+		msg.SetContext(ctx)
 
 		events, err := h(msg)
 
 		if err != nil {
-			businessSpan.RecordError(err)
-			span.RecordError(err)
+			processSpan.RecordError(err)
+			if linkedProcessSpan != nil {
+				linkedProcessSpan.RecordError(err)
+			}
+			consumeSpan.RecordError(err)
 		}
-		businessSpan.End()
-		cleanupCommandResponse(config, msg, err)
-		span.End()
+
+		processSpan.End()
+		if linkedProcessSpan != nil {
+			linkedProcessSpan.End()
+		}
+
+		if messageKind(msg, config) == MessageKindCommandResponse {
+			config.commandResponseRegistry.Delete(msg.Metadata.Get(wotelmeta.CorrelationID))
+		}
+		consumeSpan.End()
 
 		return events, err
 	}
-}
-
-func cleanupCommandResponse(config *config, msg *message.Message, err error) {
-	if err != nil || config.commandResponseRegistry == nil {
-		return
-	}
-	if messageKind(msg, config) != MessageKindCommandResponse {
-		return
-	}
-
-	config.commandResponseRegistry.Delete(msg.Metadata.Get(wotelmeta.CorrelationID))
 }
 
 // TraceNoPublishHandler decorates a watermill NoPublishHandlerFunc to add tracing when a message is received.
@@ -109,7 +110,7 @@ func TraceNoPublishHandler(h message.NoPublishHandlerFunc, options ...Option) me
 func getPropagator(config *config) propagation.TextMapPropagator {
 	if config.textMapPropagator != nil {
 		return config.textMapPropagator
-	} else {
-		return otel.GetTextMapPropagator()
 	}
+
+	return otel.GetTextMapPropagator()
 }

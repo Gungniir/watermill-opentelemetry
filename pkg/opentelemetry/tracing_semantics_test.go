@@ -45,7 +45,7 @@ func (e *spanExporter) Spans() []sdktrace.ReadOnlySpan {
 	return out
 }
 
-func TestTraceHandlerEventStartsNewBusinessRootWithLinks(t *testing.T) {
+func TestTraceHandlerEventStartsTransportChildProcessSpan(t *testing.T) {
 	restorePropagator := setTraceContextPropagator()
 	defer restorePropagator()
 
@@ -53,7 +53,6 @@ func TestTraceHandlerEventStartsNewBusinessRootWithLinks(t *testing.T) {
 	propagator := otel.GetTextMapPropagator()
 	upstreamTracer := tp.Tracer("upstream")
 	transportTracer := tp.Tracer("transport")
-	businessTracer := tp.Tracer("business")
 
 	upstreamCtx, upstreamSpan := upstreamTracer.Start(context.Background(), "upstream-event")
 	msg := message.NewMessage("1", nil)
@@ -65,7 +64,6 @@ func TestTraceHandlerEventStartsNewBusinessRootWithLinks(t *testing.T) {
 		return nil
 	},
 		WithTracer(transportTracer),
-		WithBusinessTracer(businessTracer),
 	)
 
 	err := handler(msg)
@@ -79,17 +77,22 @@ func TestTraceHandlerEventStartsNewBusinessRootWithLinks(t *testing.T) {
 	}
 
 	transportSpan := findSpanByKind(t, spans, trace.SpanKindConsumer)
-	businessSpan := findSpanByNameContains(t, spans, "[event]")
+	processSpan := findSpanByNameContains(t, spans, "[event]")
 
-	assert.False(t, businessSpan.Parent().IsValid())
-	assert.Len(t, businessSpan.Links(), 2)
+	assert.Equal(t, transportSpan.SpanContext().TraceID(), processSpan.Parent().TraceID())
+	assert.Equal(t, transportSpan.SpanContext().SpanID(), processSpan.Parent().SpanID())
+	assert.Len(t, processSpan.Links(), 1)
+	assert.ElementsMatch(t, []trace.SpanContext{
+		transportSpan.SpanContext(),
+	}, spanContextsFromLinks(processSpan.Links()))
+
+	assert.Len(t, transportSpan.Links(), 1)
 	assert.ElementsMatch(t, []trace.SpanContext{
 		upstreamSpan.SpanContext().WithRemote(true),
-		transportSpan.SpanContext(),
-	}, spanContextsFromLinks(businessSpan.Links()))
+	}, spanContextsFromLinks(transportSpan.Links()))
 }
 
-func TestTraceHandlerCommandResponseResumesOriginalWorkflowContext(t *testing.T) {
+func TestTraceHandlerCommandResponseCreatesTransportAndWorkflowProcessSpans(t *testing.T) {
 	restorePropagator := setTraceContextPropagator()
 	defer restorePropagator()
 
@@ -97,7 +100,6 @@ func TestTraceHandlerCommandResponseResumesOriginalWorkflowContext(t *testing.T)
 	propagator := otel.GetTextMapPropagator()
 	upstreamTracer := tp.Tracer("upstream")
 	transportTracer := tp.Tracer("transport")
-	businessTracer := tp.Tracer("business")
 	registry := NewInMemoryCommandResponseRegistry()
 
 	_, workflowSpan := upstreamTracer.Start(context.Background(), "workflow-root")
@@ -115,7 +117,6 @@ func TestTraceHandlerCommandResponseResumesOriginalWorkflowContext(t *testing.T)
 		return nil
 	},
 		WithTracer(transportTracer),
-		WithBusinessTracer(businessTracer),
 		WithCommandResponseRegistry(registry),
 	)
 
@@ -125,20 +126,47 @@ func TestTraceHandlerCommandResponseResumesOriginalWorkflowContext(t *testing.T)
 	}
 
 	spans := exporter.Spans()
-	if !assert.Len(t, spans, 4) {
+	if !assert.Len(t, spans, 5) {
 		return
 	}
 
 	transportSpan := findSpanByKind(t, spans, trace.SpanKindConsumer)
-	businessSpan := findSpanByNameContains(t, spans, "[command_response]")
+	processSpans := findSpansByNameContains(spans, "[command_response]")
+	if !assert.Len(t, processSpans, 2) {
+		return
+	}
 
-	assert.Equal(t, workflowSpan.SpanContext().TraceID(), businessSpan.Parent().TraceID())
-	assert.Equal(t, workflowSpan.SpanContext().SpanID(), businessSpan.Parent().SpanID())
-	assert.Len(t, businessSpan.Links(), 2)
+	var transportChildSpan sdktrace.ReadOnlySpan
+	var workflowChildSpan sdktrace.ReadOnlySpan
+	for _, span := range processSpans {
+		if span.Parent().SpanID() == transportSpan.SpanContext().SpanID() {
+			transportChildSpan = span
+		}
+		if span.Parent().SpanID() == workflowSpan.SpanContext().SpanID() {
+			workflowChildSpan = span
+		}
+	}
+
+	if assert.NotNil(t, transportChildSpan) {
+		assert.Len(t, transportChildSpan.Links(), 1)
+		assert.ElementsMatch(t, []trace.SpanContext{
+			transportSpan.SpanContext(),
+		}, spanContextsFromLinks(transportChildSpan.Links()))
+	}
+
+	if assert.NotNil(t, workflowChildSpan) {
+		assert.Equal(t, workflowSpan.SpanContext().TraceID(), workflowChildSpan.Parent().TraceID())
+		assert.Equal(t, workflowSpan.SpanContext().SpanID(), workflowChildSpan.Parent().SpanID())
+		assert.Len(t, workflowChildSpan.Links(), 1)
+		assert.ElementsMatch(t, []trace.SpanContext{
+			transportChildSpan.SpanContext(),
+		}, spanContextsFromLinks(workflowChildSpan.Links()))
+	}
+
+	assert.Len(t, transportSpan.Links(), 1)
 	assert.ElementsMatch(t, []trace.SpanContext{
 		calleeSpan.SpanContext().WithRemote(true),
-		transportSpan.SpanContext(),
-	}, spanContextsFromLinks(businessSpan.Links()))
+	}, spanContextsFromLinks(transportSpan.Links()))
 
 	_, ok := registry.Load("corr-1")
 	assert.False(t, ok)
@@ -181,6 +209,18 @@ func findSpanByNameContains(t *testing.T, spans []sdktrace.ReadOnlySpan, fragmen
 
 	return nil
 }
+
+func findSpansByNameContains(spans []sdktrace.ReadOnlySpan, fragment string) []sdktrace.ReadOnlySpan {
+	result := make([]sdktrace.ReadOnlySpan, 0)
+	for _, span := range spans {
+		if span.Name() != "" && strings.Contains(span.Name(), fragment) {
+			result = append(result, span)
+		}
+	}
+
+	return result
+}
+
 func spanContextsFromLinks(links []sdktrace.Link) []trace.SpanContext {
 	result := make([]trace.SpanContext, 0, len(links))
 	for _, link := range links {

@@ -12,9 +12,8 @@ type config struct {
 	spanAttributes          []attribute.KeyValue
 	textMapPropagator       propagation.TextMapPropagator
 	tracer                  trace.Tracer
-	spanNameFunc            func(subscriberOrPublisherName, topic string) string
-	businessTracer          trace.Tracer
-	businessSpanNameFunc    func(handler, topic, messageKind string) string
+	consumeSpanNameFunc     func(subscriberOrPublisherName, topic string) string
+	processSpanNameFunc     func(handler, topic, messageKind string) string
 	commandResponseRegistry CommandResponseRegistry
 	defaultMessageKind      string
 }
@@ -47,21 +46,14 @@ func WithTracer(t trace.Tracer) Option {
 // WithSpanNameFunc sets SpanNameFunc.
 func WithSpanNameFunc(spanNameFunc func(subscriberOrPublisherName, topic string) string) Option {
 	return func(c *config) {
-		c.spanNameFunc = spanNameFunc
-	}
-}
-
-// WithBusinessTracer sets tracer used for business spans created for handlers.
-func WithBusinessTracer(t trace.Tracer) Option {
-	return func(c *config) {
-		c.businessTracer = t
+		c.consumeSpanNameFunc = spanNameFunc
 	}
 }
 
 // WithBusinessSpanNameFunc sets naming for business spans created for handlers.
 func WithBusinessSpanNameFunc(spanNameFunc func(handler, topic, messageKind string) string) Option {
 	return func(c *config) {
-		c.businessSpanNameFunc = spanNameFunc
+		c.processSpanNameFunc = spanNameFunc
 	}
 }
 
