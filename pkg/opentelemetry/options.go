@@ -43,15 +43,15 @@ func WithTracer(t trace.Tracer) Option {
 	}
 }
 
-// WithSpanNameFunc sets SpanNameFunc.
-func WithSpanNameFunc(spanNameFunc func(subscriberOrPublisherName, topic string) string) Option {
+// WithConsumeSpanNameFunc sets SpanNameFunc.
+func WithConsumeSpanNameFunc(spanNameFunc func(subscriberOrPublisherName, topic string) string) Option {
 	return func(c *config) {
 		c.consumeSpanNameFunc = spanNameFunc
 	}
 }
 
-// WithBusinessSpanNameFunc sets naming for business spans created for handlers.
-func WithBusinessSpanNameFunc(spanNameFunc func(handler, topic, messageKind string) string) Option {
+// WithProcessSpanNameFunc sets naming for business spans created for handlers.
+func WithProcessSpanNameFunc(spanNameFunc func(handler, topic, messageKind string) string) Option {
 	return func(c *config) {
 		c.processSpanNameFunc = spanNameFunc
 	}
