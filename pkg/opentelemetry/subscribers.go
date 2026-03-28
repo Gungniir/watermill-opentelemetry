@@ -33,6 +33,7 @@ func TraceHandler(h message.HandlerFunc, options ...Option) message.HandlerFunc 
 			return fmt.Sprintf("%s: %s [%s]", handler, topic, kind)
 		},
 		commandResponseRegistry: defaultCommandResponseRegistry,
+		defaultMessageKind:      MessageKindEvent,
 	}
 
 	for _, opt := range options {

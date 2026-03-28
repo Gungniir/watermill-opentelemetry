@@ -38,6 +38,7 @@ func NewNamedPublisherDecorator(name string, pub message.Publisher, options ...O
 			return fmt.Sprintf("%s: %s", publisher, topic)
 		},
 		commandResponseRegistry: defaultCommandResponseRegistry,
+		defaultMessageKind:      MessageKindEvent,
 	}
 
 	for _, opt := range options {
@@ -75,37 +76,39 @@ func (p *PublisherDecorator) Publish(topic string, messages ...*message.Message)
 
 func (p *PublisherDecorator) startSpan(topic string, msg *message.Message) trace.Span {
 	msgctx := msg.Context()
-	if p.config.defaultMessageKind != "" && msg.Metadata.Get(wotelmeta.MessageKind) == "" {
+	if msg.Metadata.Get(wotelmeta.MessageKind) == "" {
 		SetMessageKind(msg, p.config.defaultMessageKind)
 	}
+
+	msgKind := messageKind(msg, p.config)
 
 	publisherName := message.PublisherNameFromCtx(msgctx)
 	if publisherName == "" {
 		publisherName = p.publisherName
 	}
 
-	if messageKind(msg, p.config) == MessageKindCommand {
+	if msgKind == MessageKindCommand {
 		p.registerCommandWorkflow(msgctx, msg)
 	}
 
 	spanName := p.config.consumeSpanNameFunc(publisherName, topic)
 
-	ctx, span := p.config.tracer.Start(msgctx, spanName, trace.WithSpanKind(trace.SpanKindProducer))
-	msg.SetContext(ctx)
-
-	p.getPropagator().Inject(ctx, metadataWrapper{msg.Metadata})
-
 	spanAttributes := []attribute.KeyValue{
 		semconv.MessagingDestinationKindTopic,
 		semconv.MessagingDestinationKey.String(topic),
 		semconv.MessagingOperationProcess,
+		attrMessageKind.String(msgKind),
 	}
+
 	msgName := msg.Metadata.Get("name")
 	if len(msgName) > 0 {
 		spanAttributes = append(spanAttributes, semconv.MessageTypeKey.String(msgName))
 	}
-	spanAttributes = append(spanAttributes, p.config.spanAttributes...)
-	span.SetAttributes(spanAttributes...)
+
+	ctx, span := p.config.tracer.Start(msgctx, spanName, trace.WithSpanKind(trace.SpanKindProducer), trace.WithAttributes(spanAttributes...))
+	msg.SetContext(ctx)
+
+	p.getPropagator().Inject(ctx, metadataWrapper{msg.Metadata})
 
 	return span
 }
