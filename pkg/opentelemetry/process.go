@@ -19,7 +19,6 @@ func startProcessSpan(config *config, msg *message.Message, consumingCtx context
 	handlerName := message.HandlerNameFromCtx(msgctx)
 	topic := message.SubscribeTopicFromCtx(msgctx)
 	kind := messageKind(msg, config)
-	consumingSpanContext := trace.SpanContextFromContext(consumingCtx)
 	upstreamSpanContext := trace.SpanContextFromContext(upstreamCtx)
 
 	attrs := []attribute.KeyValue{
@@ -28,10 +27,6 @@ func startProcessSpan(config *config, msg *message.Message, consumingCtx context
 
 	opts := []trace.SpanStartOption{
 		trace.WithAttributes(attrs...),
-	}
-
-	if consumingSpanContext.IsValid() {
-		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: consumingSpanContext}))
 	}
 
 	ctx, processSpan = config.tracer.Start(consumingCtx, config.processSpanNameFunc(handlerName, topic, kind), opts...)
