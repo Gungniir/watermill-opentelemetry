@@ -9,6 +9,8 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
 	"go.opentelemetry.io/otel/trace"
+
+	wotelmeta "github.com/Gungniir/watermill-opentelemetry/pkg/opentelemetry/metadata"
 )
 
 const subscriberTracerName = "watermill/subscriber"
@@ -27,6 +29,9 @@ func TraceHandler(h message.HandlerFunc, options ...Option) message.HandlerFunc 
 		spanNameFunc: func(handler, topic string) string {
 			return fmt.Sprintf("%s: %s", handler, topic)
 		},
+		businessTracer:          otel.Tracer(businessTracerName),
+		businessSpanNameFunc:    defaultBusinessSpanName,
+		commandResponseRegistry: defaultCommandResponseRegistry,
 	}
 
 	for _, opt := range options {
@@ -60,15 +65,32 @@ func TraceHandler(h message.HandlerFunc, options ...Option) message.HandlerFunc 
 		span.SetAttributes(spanAttributes...)
 		msg.SetContext(ctx)
 
+		businessCtx, businessSpan := startBusinessSpan(config, msg, ctx, ctxWithParentSpan)
+		msg.SetContext(businessCtx)
+
 		events, err := h(msg)
 
 		if err != nil {
+			businessSpan.RecordError(err)
 			span.RecordError(err)
 		}
+		businessSpan.End()
+		cleanupCommandResponse(config, msg, err)
 		span.End()
 
 		return events, err
 	}
+}
+
+func cleanupCommandResponse(config *config, msg *message.Message, err error) {
+	if err != nil || config.commandResponseRegistry == nil {
+		return
+	}
+	if messageKind(msg, config) != MessageKindCommandResponse {
+		return
+	}
+
+	config.commandResponseRegistry.Delete(msg.Metadata.Get(wotelmeta.CorrelationID))
 }
 
 // TraceNoPublishHandler decorates a watermill NoPublishHandlerFunc to add tracing when a message is received.

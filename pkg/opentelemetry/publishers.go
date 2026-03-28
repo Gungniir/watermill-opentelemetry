@@ -1,6 +1,7 @@
 package opentelemetry
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
 	"go.opentelemetry.io/otel/trace"
+
+	wotelmeta "github.com/Gungniir/watermill-opentelemetry/pkg/opentelemetry/metadata"
 )
 
 const publisherTracerName = "watermill/publisher"
@@ -34,6 +37,7 @@ func NewNamedPublisherDecorator(name string, pub message.Publisher, options ...O
 		spanNameFunc: func(publisher, topic string) string {
 			return fmt.Sprintf("%s: %s", publisher, topic)
 		},
+		commandResponseRegistry: defaultCommandResponseRegistry,
 	}
 
 	for _, opt := range options {
@@ -71,6 +75,9 @@ func (p *PublisherDecorator) Publish(topic string, messages ...*message.Message)
 
 func (p *PublisherDecorator) startSpan(topic string, msg *message.Message) trace.Span {
 	msgctx := msg.Context()
+	if p.config.defaultMessageKind != "" && msg.Metadata.Get(wotelmeta.MessageKind) == "" {
+		SetMessageKind(msg, p.config.defaultMessageKind)
+	}
 
 	publisherName := message.PublisherNameFromCtx(msgctx)
 	if publisherName == "" {
@@ -83,6 +90,7 @@ func (p *PublisherDecorator) startSpan(topic string, msg *message.Message) trace
 	msg.SetContext(ctx)
 
 	p.getPropagator().Inject(ctx, metadataWrapper{msg.Metadata})
+	p.registerCommandWorkflow(ctx, msg)
 
 	spanAttributes := []attribute.KeyValue{
 		semconv.MessagingDestinationKindTopic,
@@ -97,6 +105,23 @@ func (p *PublisherDecorator) startSpan(topic string, msg *message.Message) trace
 	span.SetAttributes(spanAttributes...)
 
 	return span
+}
+
+func (p *PublisherDecorator) registerCommandWorkflow(ctx context.Context, msg *message.Message) {
+	if p.config.commandResponseRegistry == nil {
+		return
+	}
+	if messageKind(msg, &p.config) != MessageKindCommand {
+		return
+	}
+
+	correlationID := msg.Metadata.Get(wotelmeta.CorrelationID)
+	spanContext := trace.SpanContextFromContext(ctx)
+	if !spanContext.IsValid() {
+		return
+	}
+
+	p.config.commandResponseRegistry.Save(correlationID, spanContext)
 }
 
 func (p *PublisherDecorator) endSpan(err error, span trace.Span) {

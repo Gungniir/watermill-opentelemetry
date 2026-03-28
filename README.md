@@ -1,115 +1,123 @@
-# Watermill OpenTelemetry integration
+# watermill-opentelemetry
 
-Bringing distributed tracing support to [Watermill](https://watermill.io/) with [OpenTelemetry](https://opentelemetry.io/). 
+Repository-local Watermill tracing helpers built on OpenTelemetry.
 
-## Usage
+This package keeps standard Watermill transport tracing and adds a repository convention for business tracing over messaging.
 
-### Installation
+## Concepts
 
-```shell
-go get github.com/nkonev/watermill-opentelemetry
-```
+The package distinguishes two tracing layers:
 
-### For publishers
+- transport spans: publisher and consumer spans created around broker interaction
+- business spans: handler spans created for application work
 
-```go
-package example
+Transport spans describe message movement. Business spans describe workflow causality.
 
-import (
-    "github.com/ThreeDotsLabs/watermill-googlecloud/pkg/googlecloud"
-    "github.com/ThreeDotsLabs/watermill/message"
-    "github.com/garsue/watermillzap"
-	wotel "github.com/nkonev/watermill-opentelemetry"
-    "go.uber.org/zap"
-)
+## Message kinds
 
-type PublisherConfig struct {
-	Name         string
-	GCPProjectID string
-}
+Message classification is explicit and carried in message metadata:
 
-// NewPublisher instantiates a GCP Pub/Sub Publisher with tracing capabilities.
-func NewPublisher(logger *zap.Logger, config PublisherConfig) (message.Publisher, error) {
-	publisher, err := googlecloud.NewPublisher(
-        googlecloud.PublisherConfig{ProjectID: config.GCPProjectID},
-        watermillzap.NewLogger(logger),
-    )
-	if err != nil {
-		return nil, err
-	}
+- `event`
+- `command`
+- `command_response`
 
-	if config.Name == "" {
-		return wotel.NewPublisherDecorator(publisher), nil
-	}
+Metadata keys and helpers live in:
 
-	return wotel.NewNamedPublisherDecorator(config.Name, publisher), nil
-}
-```
+- `github.com/Gungniir/watermill-opentelemetry/pkg/opentelemetry/metadata`
 
-### For subscribers
-
-A tracing middleware can be defined at the router level:
+Typical import alias:
 
 ```go
-package example
-
-import (
-	"github.com/ThreeDotsLabs/watermill"
-	"github.com/ThreeDotsLabs/watermill/message"
-	wotel "github.com/nkonev/watermill-opentelemetry"
-)
-
-func InitTracedRouter() (*message.Router, error) {
-	router, err := message.NewRouter(message.RouterConfig{}, watermill.NopLogger{})
-	if err != nil {
-		return nil, err
-	}
-
-	router.AddMiddleware(wotel.Trace())
-
-	return router, nil
-}
+import wotelmeta "github.com/Gungniir/watermill-opentelemetry/pkg/opentelemetry/metadata"
 ```
 
-Alternatively, individual handlers can be traced: 
+## Business tracing convention
+
+### `event`
+
+- consumer transport span remains a transport span
+- handler business span starts as a new root span
+- business span links to upstream propagated context when present
+- business span links to local transport span when present
+
+### `command`
+
+- consumer transport span remains a transport span
+- handler business span continues the propagated workflow context
+- business span is not a child of the local transport span
+- business span links to the local transport span
+
+### `command_response`
+
+- reply metadata may carry callee trace context
+- caller business work must resume the original workflow context saved when the command was sent
+- business span links to callee reply context
+- business span links to local transport span
+
+## Registry
+
+`command_response` handling needs access to the original caller workflow context.
+
+The package provides:
+
+- `CommandResponseRegistry` interface
+- `NewInMemoryCommandResponseRegistry()` default in-memory implementation
+
+Custom implementations can be injected with:
 
 ```go
-package example
-
-import (
-	"github.com/ThreeDotsLabs/watermill"
-	"github.com/ThreeDotsLabs/watermill/message"
-	wotel "github.com/nkonev/watermill-opentelemetry"
-)
-
-func InitRouter() (*message.Router, error) {
-	router, err := message.NewRouter(message.RouterConfig{}, watermill.NopLogger{})
-	if err != nil {
-		return nil, err
-	}
-    
-    // subscriber definition omitted for clarity
-    subscriber := (message.Subscriber)(nil)
-
-	router.AddNoPublisherHandler(
-        "handler_name",
-        "subscribeTopic",
-        subscriber,
-        wotel.TraceNoPublishHandler(func(msg *message.Message) error {
-            return nil
-        }),
-    )
-
-	return router, nil
-}
+wotel.WithCommandResponseRegistry(registry)
 ```
 
-### Contributors
+## Publisher behavior
 
-- [@K-Phoen](https://github.com/K-Phoen)
-- [@jeespers](https://github.com/jeespers)
-- [@nkonev](https://github.com/nkonev)
+`NewPublisherDecorator(...)` still creates transport publish spans and injects propagated trace context into message metadata.
 
-## License
+Additional behavior:
 
-Apache 2.0, see [LICENSE.md](LICENSE.md).
+- `WithDefaultMessageKind(kind)` sets `message_kind` when the message does not already declare one
+- `command` messages register the current workflow `SpanContext` in the configured command-response registry by `correlation_id`
+
+Example:
+
+```go
+publisher = wotel.NewPublisherDecorator(
+    publisher,
+    wotel.WithDefaultMessageKind(wotelmeta.MessageKindEvent),
+)
+```
+
+## Consumer behavior
+
+`TraceHandler(...)` still creates the Watermill consumer transport span.
+
+It now also creates a business span for handler execution according to `message_kind`:
+
+- `event`: new root + links
+- `command`: continue workflow context + link transport
+- `command_response`: resume original workflow context from registry + links
+
+The handler receives the business-shaped context through `msg.Context()`.
+
+## Options
+
+- `WithTracer(...)`: transport tracer
+- `WithSpanNameFunc(...)`: transport span naming
+- `WithBusinessTracer(...)`: business tracer
+- `WithBusinessSpanNameFunc(...)`: business span naming
+- `WithTextMapPropagator(...)`: custom propagator
+- `WithSpanAttributes(...)`: extra transport span attributes
+- `WithCommandResponseRegistry(...)`: custom reply registry
+- `WithDefaultMessageKind(...)`: default message classification
+
+## Custom attributes
+
+This package uses a repository-specific attribute for business intent:
+
+- `messaging.message.kind`
+
+Related diagnostic attributes:
+
+- `messaging.message.context_missing`
+- `messaging.message.command_response_registry_miss`
+- `messaging.message.invalid_kind`

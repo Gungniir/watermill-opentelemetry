@@ -9,10 +9,14 @@ import (
 // config represents the configuration options available for subscriber
 // middlewares and publisher decorators.
 type config struct {
-	spanAttributes    []attribute.KeyValue
-	textMapPropagator propagation.TextMapPropagator
-	tracer            trace.Tracer
-	spanNameFunc      func(subscriberOrPublisherName, topic string) string
+	spanAttributes          []attribute.KeyValue
+	textMapPropagator       propagation.TextMapPropagator
+	tracer                  trace.Tracer
+	spanNameFunc            func(subscriberOrPublisherName, topic string) string
+	businessTracer          trace.Tracer
+	businessSpanNameFunc    func(handler, topic, messageKind string) string
+	commandResponseRegistry CommandResponseRegistry
+	defaultMessageKind      string
 }
 
 // Option provides a convenience wrapper for simple options that can be
@@ -44,5 +48,33 @@ func WithTracer(t trace.Tracer) Option {
 func WithSpanNameFunc(spanNameFunc func(subscriberOrPublisherName, topic string) string) Option {
 	return func(c *config) {
 		c.spanNameFunc = spanNameFunc
+	}
+}
+
+// WithBusinessTracer sets tracer used for business spans created for handlers.
+func WithBusinessTracer(t trace.Tracer) Option {
+	return func(c *config) {
+		c.businessTracer = t
+	}
+}
+
+// WithBusinessSpanNameFunc sets naming for business spans created for handlers.
+func WithBusinessSpanNameFunc(spanNameFunc func(handler, topic, messageKind string) string) Option {
+	return func(c *config) {
+		c.businessSpanNameFunc = spanNameFunc
+	}
+}
+
+// WithCommandResponseRegistry sets command response registry implementation.
+func WithCommandResponseRegistry(registry CommandResponseRegistry) Option {
+	return func(c *config) {
+		c.commandResponseRegistry = registry
+	}
+}
+
+// WithDefaultMessageKind sets a default message kind for messages that omit metadata.
+func WithDefaultMessageKind(kind string) Option {
+	return func(c *config) {
+		c.defaultMessageKind = kind
 	}
 }
